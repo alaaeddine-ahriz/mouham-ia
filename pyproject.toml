@@ -1,0 +1,27 @@
+[project]
+name = "mouhamia"
+version = "0.1.0"
+description = "Mouham'IA - Your AI Legal Assistant (محامي + IA)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=2.14.0",
+    "pdfplumber>=0.11.8",
+    "pinecone>=8.0.0",
+    "pydantic-settings>=2.12.0",
+    "python-dotenv>=1.2.1",
+    "rich>=14.2.0",
+    "tiktoken>=0.12.0",
+    "typer>=0.20.1",
+]
+
+[project.scripts]
+mouhamia = "legal_rag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
