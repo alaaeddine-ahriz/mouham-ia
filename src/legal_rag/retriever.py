@@ -64,6 +64,7 @@ def retrieve(
     query: str,
     intent: QueryIntent | None = None,
     top_k: int | None = None,
+    category: str | None = None,
 ) -> list[dict]:
     """
     Retrieve relevant chunks for a query.
@@ -72,6 +73,7 @@ def retrieve(
         query: The user's question
         intent: Override automatic intent detection
         top_k: Number of results to return
+        category: Optional legal category filter (e.g., "numerique", "civil")
 
     Returns:
         List of relevant chunks with metadata
@@ -88,11 +90,11 @@ def retrieve(
 
     # Route to appropriate namespace(s)
     if intent == QueryIntent.LAW_CODES:
-        results = query_similar(query_embedding, NAMESPACE_LAW_CODES, top_k)
+        results = query_similar(query_embedding, NAMESPACE_LAW_CODES, top_k, category=category)
         for r in results:
             r["namespace"] = NAMESPACE_LAW_CODES
     elif intent == QueryIntent.CONTRACTS:
-        results = query_similar(query_embedding, NAMESPACE_USER_CONTRACTS, top_k)
+        results = query_similar(query_embedding, NAMESPACE_USER_CONTRACTS, top_k, category=category)
         for r in results:
             r["namespace"] = NAMESPACE_USER_CONTRACTS
     else:  # BOTH
@@ -100,6 +102,7 @@ def retrieve(
             query_embedding,
             [NAMESPACE_LAW_CODES, NAMESPACE_USER_CONTRACTS],
             top_k,
+            category=category,
         )
 
     return results
@@ -119,10 +122,13 @@ def format_context_for_llm(chunks: list[dict]) -> str:
         source = chunk["source"]
         page = chunk.get("page_number", "")
         section = chunk.get("section_header", "")
+        category = chunk.get("category", "")
         text = chunk["text"]
 
         # Build source label
         source_label = source
+        if category and category != "general":
+            source_label = f"[{category.upper()}] {source_label}"
         if page:
             source_label += f", Page {page}"
         if section:

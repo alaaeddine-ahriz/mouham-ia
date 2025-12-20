@@ -102,6 +102,7 @@ def query_similar(
     query_embedding: list[float],
     namespace: str,
     top_k: int = 5,
+    category: str | None = None,
 ) -> list[dict]:
     """
     Query for similar chunks in a namespace.
@@ -110,6 +111,7 @@ def query_similar(
         query_embedding: Query vector
         namespace: Namespace to search
         top_k: Number of results to return
+        category: Optional category filter (e.g., "numerique", "civil")
 
     Returns:
         List of matches with metadata
@@ -118,11 +120,17 @@ def query_similar(
     pc = get_pinecone_client()
     index = pc.Index(settings.pinecone_index_name)
 
+    # Build filter if category specified
+    query_filter = None
+    if category:
+        query_filter = {"category": {"$eq": category}}
+
     results = index.query(
         vector=query_embedding,
         namespace=namespace,
         top_k=top_k,
         include_metadata=True,
+        filter=query_filter,
     )
 
     return [
@@ -133,6 +141,7 @@ def query_similar(
             "source": match.metadata.get("source", ""),
             "page_number": match.metadata.get("page_number", 0),
             "section_header": match.metadata.get("section_header", ""),
+            "category": match.metadata.get("category", "general"),
         }
         for match in results.matches
     ]
@@ -142,6 +151,7 @@ def query_multiple_namespaces(
     query_embedding: list[float],
     namespaces: list[str],
     top_k: int = 5,
+    category: str | None = None,
 ) -> list[dict]:
     """
     Query multiple namespaces and merge results.
@@ -150,6 +160,7 @@ def query_multiple_namespaces(
         query_embedding: Query vector
         namespaces: List of namespaces to search
         top_k: Number of results per namespace
+        category: Optional category filter
 
     Returns:
         Merged and sorted list of matches
@@ -157,7 +168,7 @@ def query_multiple_namespaces(
     all_results = []
 
     for namespace in namespaces:
-        results = query_similar(query_embedding, namespace, top_k)
+        results = query_similar(query_embedding, namespace, top_k, category=category)
         for result in results:
             result["namespace"] = namespace
         all_results.extend(results)

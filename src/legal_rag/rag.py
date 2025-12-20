@@ -74,6 +74,7 @@ def ask(
     query: str,
     intent: QueryIntent | None = None,
     top_k: int | None = None,
+    category: str | None = None,
 ) -> RAGResponse:
     """
     Ask a question and get an answer with citations.
@@ -82,6 +83,7 @@ def ask(
         query: The user's question
         intent: Override automatic intent detection
         top_k: Number of chunks to retrieve
+        category: Optional legal category filter (e.g., "numerique", "civil")
 
     Returns:
         RAGResponse with answer and source citations
@@ -90,7 +92,7 @@ def ask(
     client = OpenAI(api_key=settings.openai_api_key)
 
     # Retrieve relevant chunks
-    chunks = retrieve(query, intent=intent, top_k=top_k)
+    chunks = retrieve(query, intent=intent, top_k=top_k, category=category)
 
     # Format context
     context = format_context_for_llm(chunks)
@@ -131,6 +133,7 @@ def chat_stream(
     query: str,
     intent: QueryIntent | None = None,
     top_k: int | None = None,
+    category: str | None = None,
 ):
     """
     Stream a response for interactive chat.
@@ -141,7 +144,7 @@ def chat_stream(
     client = OpenAI(api_key=settings.openai_api_key)
 
     # Retrieve relevant chunks
-    chunks = retrieve(query, intent=intent, top_k=top_k)
+    chunks = retrieve(query, intent=intent, top_k=top_k, category=category)
 
     # Format context
     context = format_context_for_llm(chunks)

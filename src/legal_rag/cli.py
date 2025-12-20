@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from .config import get_settings
+from .config import LEGAL_CATEGORIES, get_settings
 from .embeddings import get_embeddings
 from .ingest.chunker import chunk_document
 from .ingest.pdf_extractor import extract_pdf, extract_pdfs_from_directory
@@ -120,6 +120,12 @@ def ask_question(
         "auto",
         help="Source to search: 'law', 'contracts', 'both', or 'auto'",
     ),
+    category: str = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help=f"Filter by legal category: {', '.join(LEGAL_CATEGORIES.keys())}",
+    ),
     top_k: int = typer.Option(5, help="Number of chunks to retrieve"),
     deep: bool = typer.Option(False, "--deep", "-d", help="Enable deep reasoning mode"),
 ):
@@ -134,6 +140,15 @@ def ask_question(
         intent = QueryIntent.BOTH
     # else auto-detect
 
+    # Validate category
+    if category and category not in LEGAL_CATEGORIES:
+        console.print(f"[red]Invalid category: {category}[/red]")
+        console.print(f"Valid categories: {', '.join(LEGAL_CATEGORIES.keys())}")
+        raise typer.Exit(1)
+
+    if category:
+        console.print(f"[dim]Filtering by category: {category} ({LEGAL_CATEGORIES[category]})[/dim]\n")
+
     if deep:
         # Use deep reasoning mode
         console.print("\n[bold magenta]🧠 Deep Reasoning Mode[/bold magenta]\n")
@@ -145,7 +160,7 @@ def ask_question(
             console.print(f"\n[red]Error: {e}[/red]")
     else:
         with console.status("[bold green]Thinking..."):
-            response = ask(question, intent=intent, top_k=top_k)
+            response = ask(question, intent=intent, top_k=top_k, category=category)
 
         console.print()
         console.print(Panel(response.answer, title="Answer", border_style="green"))
@@ -157,6 +172,12 @@ def reason(
     source: str = typer.Option(
         "auto",
         help="Source to search: 'law', 'contracts', 'both', or 'auto'",
+    ),
+    category: str = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help=f"Filter by legal category: {', '.join(LEGAL_CATEGORIES.keys())}",
     ),
     depth: str = typer.Option(
         "deep",
@@ -195,6 +216,12 @@ def reason(
     elif source == "both":
         intent = QueryIntent.BOTH
 
+    # Validate category
+    if category and category not in LEGAL_CATEGORIES:
+        console.print(f"[red]Invalid category: {category}[/red]")
+        console.print(f"Valid categories: {', '.join(LEGAL_CATEGORIES.keys())}")
+        raise typer.Exit(1)
+
     # Parse depth
     reasoning_depth = ReasoningDepth.DEEP
     if depth == "quick":
@@ -211,6 +238,9 @@ def reason(
         mode_desc = "Query Decomposition"
     else:
         mode_desc = f"Depth: {reasoning_depth.value.upper()}"
+
+    if category:
+        mode_desc += f"\nCategory: {category} ({LEGAL_CATEGORIES[category]})"
 
     console.print()
     console.print(
@@ -469,6 +499,34 @@ def chat(
 
         except Exception as e:
             console.print(f"\n[red]Error: {e}[/red]")
+
+
+@app.command()
+def categories():
+    """List all available legal categories."""
+    console.print()
+    console.print(
+        Panel(
+            "[bold]Available Legal Categories[/bold]\n\n"
+            "Use with --category / -c flag in ask, reason, or compare commands.",
+            title="Categories",
+            border_style="cyan",
+        )
+    )
+    console.print()
+
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Code", style="green")
+    table.add_column("Description")
+
+    for code, description in LEGAL_CATEGORIES.items():
+        table.add_row(code, description)
+
+    console.print(table)
+    console.print()
+    console.print("[dim]Example: mouhamia ask 'question' --category numerique[/dim]")
 
 
 @app.command()

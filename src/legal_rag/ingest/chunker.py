@@ -17,6 +17,7 @@ class Chunk:
     page_number: int  # Starting page number
     chunk_index: int  # Position in document
     section_header: str | None  # Extracted section title if found
+    category: str = "general"  # Legal domain category
 
     def to_metadata(self) -> dict:
         """Convert to Pinecone metadata dict."""
@@ -26,6 +27,7 @@ class Chunk:
             "page_number": self.page_number,
             "chunk_index": self.chunk_index,
             "section_header": self.section_header or "",
+            "category": self.category,
         }
 
 
@@ -111,6 +113,7 @@ def chunk_document(
                             page_number=page.page_number,
                             chunk_index=chunk_index,
                             section_header=_extract_section_header(current_chunk_text),
+                            category=document.category,
                         )
                     )
                     chunk_index += 1
@@ -131,6 +134,7 @@ def chunk_document(
                                 section_header=_extract_section_header(
                                     current_chunk_text
                                 ),
+                                category=document.category,
                             )
                         )
                         chunk_index += 1
@@ -152,6 +156,7 @@ def chunk_document(
                         page_number=page.page_number,
                         chunk_index=chunk_index,
                         section_header=_extract_section_header(current_chunk_text),
+                        category=document.category,
                     )
                 )
                 chunk_index += 1
@@ -177,6 +182,7 @@ def chunk_document(
                     page_number=page.page_number,
                     chunk_index=chunk_index,
                     section_header=_extract_section_header(current_chunk_text),
+                    category=document.category,
                 )
             )
             chunk_index += 1
