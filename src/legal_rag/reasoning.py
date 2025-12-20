@@ -155,6 +155,10 @@ CRITICAL RULES:
 2. ALWAYS cite with bracketed numbers [1], [2]
 3. Use EXACT QUOTES in French from the sources
 4. If information is insufficient, clearly state what is missing
+5. If NO documents are provided or context says "No relevant context found", you MUST respond:
+   "Je n'ai pas trouvé de documents pertinents dans la base de données pour répondre à cette question. 
+   Veuillez vérifier que les textes juridiques appropriés ont été ingérés, ou reformulez votre question."
+   Then suggest what type of legal texts might be needed.
 5. Never fabricate legal provisions or citations
 6. Distinguish between what the law says vs interpretation"""
 
@@ -457,6 +461,7 @@ def reason_deep(
     query: str,
     intent: QueryIntent | None = None,
     top_k: int | None = None,
+    category: str | None = None,
 ) -> LegalReasoning:
     """
     Perform deep legal reasoning on a query.
@@ -470,7 +475,32 @@ def reason_deep(
     effective_top_k = (top_k or settings.top_k) * 2
 
     # Retrieve relevant chunks
-    chunks = retrieve(query, intent=intent, top_k=effective_top_k)
+    chunks = retrieve(query, intent=intent, top_k=effective_top_k, category=category)
+
+    # Handle no sources found
+    if not chunks:
+        no_source_message = (
+            "## Aucune Source Trouvée\n\n"
+            "Je n'ai pas trouvé de documents pertinents dans la base de données pour répondre à cette question.\n\n"
+            "**Suggestions:**\n"
+            "- Vérifiez que les textes juridiques appropriés ont été ingérés\n"
+            "- Essayez de reformuler votre question\n"
+            "- Vérifiez la catégorie de recherche si vous en avez spécifié une\n\n"
+            f"**Question posée:** {query}"
+        )
+        return LegalReasoning(
+            query=query,
+            intent=intent or QueryIntent.BOTH,
+            reasoning_steps=[
+                ReasoningStep(
+                    step_type="retrieval",
+                    content="No relevant documents found in the database",
+                ),
+            ],
+            final_answer=no_source_message,
+            sources=[],
+            confidence="NONE",
+        )
 
     # Format context
     context = format_context_for_llm(chunks)
@@ -524,6 +554,7 @@ def reason_multistep(
     top_k: int | None = None,
     max_iterations: int = 3,
     use_hyde: bool = False,
+    category: str | None = None,
 ) -> LegalReasoning:
     """
     Deep reasoning with multi-step iterative retrieval.
@@ -536,6 +567,7 @@ def reason_multistep(
         top_k: Chunks per retrieval step
         max_iterations: Maximum retrieval iterations
         use_hyde: Whether to use Hypothetical Document Embeddings
+        category: Optional legal category filter
         
     Returns:
         LegalReasoning with comprehensive analysis
@@ -551,6 +583,30 @@ def reason_multistep(
         max_iterations=max_iterations,
         use_hyde=use_hyde,
     )
+    
+    # Handle no sources found
+    if not chunks:
+        no_source_message = (
+            "## Aucune Source Trouvée\n\n"
+            "Après plusieurs étapes de recherche, je n'ai pas trouvé de documents pertinents "
+            "dans la base de données pour répondre à cette question.\n\n"
+            "**Suggestions:**\n"
+            "- Vérifiez que les textes juridiques appropriés ont été ingérés\n"
+            "- Essayez de reformuler votre question\n"
+            "- Vérifiez la catégorie de recherche si vous en avez spécifié une\n\n"
+            f"**Question posée:** {query}"
+        )
+        return LegalReasoning(
+            query=query,
+            intent=intent or QueryIntent.BOTH,
+            reasoning_steps=[
+                ReasoningStep(step_type=s.get("type", "unknown"), content=str(s))
+                for s in retrieval_steps
+            ] + [ReasoningStep(step_type="no_sources", content="No documents found after multi-step retrieval")],
+            final_answer=no_source_message,
+            sources=[],
+            confidence="NONE",
+        )
     
     # Format context
     context = format_context_for_llm(chunks)
@@ -755,6 +811,17 @@ def reason_stream(
     # Retrieve
     yield "📚 Retrieving relevant legal documents...\n\n"
     chunks = retrieve(query, intent=intent, top_k=effective_top_k)
+    
+    # Handle no sources found
+    if not chunks:
+        yield "⚠️ **Aucune source trouvée**\n\n"
+        yield "Je n'ai pas trouvé de documents pertinents dans la base de données pour répondre à cette question.\n\n"
+        yield "**Suggestions:**\n"
+        yield "- Vérifiez que les textes juridiques appropriés ont été ingérés\n"
+        yield "- Essayez de reformuler votre question\n"
+        yield "- Vérifiez la catégorie de recherche si vous en avez spécifié une\n"
+        return
+    
     yield f"✓ Found {len(chunks)} relevant passages\n\n"
     yield "⚖️ Applying legal reasoning...\n\n---\n\n"
 
