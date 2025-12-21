@@ -14,6 +14,9 @@ from .ingest.pdf_extractor import extract_pdf, extract_pdfs_from_directory
 from .pinecone_store import (
     NAMESPACE_LAW_CODES,
     NAMESPACE_USER_CONTRACTS,
+    clear_all_namespaces,
+    clear_namespace,
+    delete_index,
     ensure_index_exists,
     get_index_stats,
     upsert_chunks,
@@ -550,6 +553,87 @@ def init():
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
+
+
+@app.command()
+def reset(
+    target: str = typer.Option(
+        "all",
+        help="What to reset: 'all', 'laws', 'contracts', or 'index' (deletes entire index)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip confirmation prompt",
+    ),
+):
+    """Reset/clear the vector database."""
+    # Confirmation
+    if target == "index":
+        action = "DELETE the entire Pinecone index"
+        warning = "[bold red]This will permanently delete the index and all data![/bold red]"
+    elif target == "all":
+        action = "clear ALL vectors from both namespaces"
+        warning = "[yellow]This will delete all law codes and contracts data.[/yellow]"
+    elif target == "laws":
+        action = "clear all LAW CODES"
+        warning = "[yellow]This will delete all ingested law documents.[/yellow]"
+    elif target == "contracts":
+        action = "clear all CONTRACTS"
+        warning = "[yellow]This will delete all ingested contract documents.[/yellow]"
+    else:
+        console.print(f"[red]Invalid target: {target}[/red]")
+        console.print("Valid options: all, laws, contracts, index")
+        raise typer.Exit(1)
+
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Action:[/bold] {action}\n\n{warning}",
+            title="⚠️ Reset Confirmation",
+            border_style="red",
+        )
+    )
+
+    if not force:
+        confirm = typer.confirm("\nAre you sure you want to proceed?")
+        if not confirm:
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    console.print()
+
+    try:
+        if target == "index":
+            with console.status("[bold red]Deleting index..."):
+                deleted = delete_index()
+            if deleted:
+                console.print("[green]✓ Index deleted successfully.[/green]")
+                console.print("[dim]Run 'mouhamia init' to recreate the index.[/dim]")
+            else:
+                console.print("[yellow]Index did not exist.[/yellow]")
+
+        elif target == "all":
+            with console.status("[bold yellow]Clearing all namespaces..."):
+                deleted = clear_all_namespaces()
+            console.print("[green]✓ All namespaces cleared:[/green]")
+            for ns, count in deleted.items():
+                console.print(f"  - {ns}: {count} vectors deleted")
+
+        elif target == "laws":
+            with console.status("[bold yellow]Clearing law codes..."):
+                count = clear_namespace(NAMESPACE_LAW_CODES)
+            console.print(f"[green]✓ Cleared {count} vectors from law_codes namespace.[/green]")
+
+        elif target == "contracts":
+            with console.status("[bold yellow]Clearing contracts..."):
+                count = clear_namespace(NAMESPACE_USER_CONTRACTS)
+            console.print(f"[green]✓ Cleared {count} vectors from user_contracts namespace.[/green]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
 def main():

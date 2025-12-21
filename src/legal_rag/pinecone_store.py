@@ -199,6 +199,91 @@ def delete_by_source(source: str, namespace: str) -> None:
     )
 
 
+def clear_namespace(namespace: str) -> int:
+    """
+    Delete all vectors in a namespace.
+    
+    Args:
+        namespace: Namespace to clear
+        
+    Returns:
+        Number of vectors deleted (approximate)
+    """
+    settings = get_settings()
+    pc = get_pinecone_client()
+    index = pc.Index(settings.pinecone_index_name)
+    
+    # Get count before deletion
+    stats = index.describe_index_stats()
+    count = 0
+    if hasattr(stats, 'namespaces') and stats.namespaces:
+        ns_stats = stats.namespaces.get(namespace)
+        if ns_stats:
+            count = getattr(ns_stats, 'vector_count', 0)
+    
+    # Only try to delete if namespace has vectors
+    if count > 0:
+        try:
+            index.delete(delete_all=True, namespace=namespace)
+        except Exception:
+            pass  # Namespace might not exist
+    
+    return count
+
+
+def clear_all_namespaces() -> dict:
+    """
+    Delete all vectors in all namespaces.
+    
+    Returns:
+        Dict with counts per namespace deleted
+    """
+    settings = get_settings()
+    pc = get_pinecone_client()
+    index = pc.Index(settings.pinecone_index_name)
+    
+    # Get stats before deletion
+    stats = index.describe_index_stats()
+    deleted = {}
+    
+    # Clear each namespace
+    for namespace in [NAMESPACE_LAW_CODES, NAMESPACE_USER_CONTRACTS]:
+        count = 0
+        if hasattr(stats, 'namespaces') and stats.namespaces:
+            ns_stats = stats.namespaces.get(namespace)
+            if ns_stats:
+                count = getattr(ns_stats, 'vector_count', 0)
+        
+        # Only try to delete if namespace has vectors
+        if count > 0:
+            try:
+                index.delete(delete_all=True, namespace=namespace)
+            except Exception:
+                pass  # Namespace might not exist
+        
+        deleted[namespace] = count
+    
+    return deleted
+
+
+def delete_index() -> bool:
+    """
+    Delete the entire Pinecone index.
+    
+    Returns:
+        True if deleted, False if didn't exist
+    """
+    settings = get_settings()
+    pc = get_pinecone_client()
+    
+    existing_indexes = [idx.name for idx in pc.list_indexes()]
+    
+    if settings.pinecone_index_name in existing_indexes:
+        pc.delete_index(settings.pinecone_index_name)
+        return True
+    return False
+
+
 def get_index_stats() -> dict:
     """Get statistics about the Pinecone index."""
     settings = get_settings()
