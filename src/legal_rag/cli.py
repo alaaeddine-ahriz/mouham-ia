@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from .config import LEGAL_CATEGORIES, get_settings
+from .config import get_settings
 from .embeddings import get_embeddings
 from .ingest.chunker import chunk_document
 from .ingest.pdf_extractor import extract_pdf, extract_pdfs_from_directory
@@ -18,20 +18,11 @@ from .pinecone_store import (
     clear_namespace,
     delete_index,
     ensure_index_exists,
+    get_all_categories,
     get_index_stats,
     upsert_chunks,
 )
-from .rag import ask, chat_stream
-from .reasoning import (
-    LegalReasoning,
-    ReasoningDepth,
-    compare_provisions,
-    reason_deep,
-    reason_multistep,
-    reason_stream,
-    reason_with_decomposition,
-)
-from .retriever import QueryIntent
+from .rag import analyze, analyze_stream, format_for_cli, QueryIntent
 
 app = typer.Typer(
     name="mouhamia",
@@ -40,6 +31,10 @@ app = typer.Typer(
 )
 console = Console()
 
+
+# ============================================================================
+# Ingestion Commands
+# ============================================================================
 
 @app.command()
 def ingest_laws(
@@ -72,11 +67,9 @@ def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        # Ensure index exists
         progress.add_task("Ensuring Pinecone index exists...", total=None)
         ensure_index_exists()
 
-        # Extract PDFs
         progress.add_task("Extracting PDFs...", total=None)
         if path.is_file():
             documents = [extract_pdf(path)]
@@ -89,7 +82,6 @@ def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
 
         console.print(f"[green]Found {len(documents)} document(s)[/green]")
 
-        # Chunk documents
         all_chunks = []
         for doc in documents:
             progress.add_task(f"Chunking {doc.source}...", total=None)
@@ -99,12 +91,10 @@ def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
 
         console.print(f"[green]Total chunks: {len(all_chunks)}[/green]")
 
-        # Generate embeddings
         progress.add_task("Generating embeddings...", total=None)
         texts = [chunk.text for chunk in all_chunks]
         embeddings = get_embeddings(texts)
 
-        # Upsert to Pinecone
         progress.add_task("Uploading to Pinecone...", total=None)
         count = upsert_chunks(all_chunks, embeddings, namespace)
 
@@ -116,201 +106,114 @@ def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
     )
 
 
+# ============================================================================
+# Query Commands
+# ============================================================================
+
+def _parse_intent(source: str) -> QueryIntent | None:
+    """Parse source string to QueryIntent."""
+    if source == "law":
+        return QueryIntent.LAW_CODES
+    elif source == "contracts":
+        return QueryIntent.CONTRACTS
+    elif source == "both":
+        return QueryIntent.BOTH
+    return None  # auto-detect
+
+
+def _validate_category(category: str | None) -> bool:
+    """Validate category if provided. Returns True if valid or None."""
+    if not category:
+        return True
+    
+    try:
+        available = get_all_categories()
+        if category not in available:
+            console.print(f"[red]Invalid category: {category}[/red]")
+            if available:
+                console.print(f"Available categories: {', '.join(sorted(available.keys()))}")
+            else:
+                console.print("[yellow]No categories found. Ingest documents first.[/yellow]")
+            return False
+        return True
+    except Exception:
+        # If we can't check, allow it
+        return True
+
+
 @app.command(name="ask")
 def ask_question(
-    question: str = typer.Argument(..., help="Your question"),
-    source: str = typer.Option(
-        "auto",
-        help="Source to search: 'law', 'contracts', 'both', or 'auto'",
-    ),
-    category: str = typer.Option(
-        None,
-        "--category",
-        "-c",
-        help=f"Filter by legal category: {', '.join(LEGAL_CATEGORIES.keys())}",
-    ),
-    top_k: int = typer.Option(5, help="Number of chunks to retrieve"),
-    deep: bool = typer.Option(False, "--deep", "-d", help="Enable deep reasoning mode"),
-):
-    """Ask a question and get an answer with citations."""
-    # Parse intent
-    intent = None
-    if source == "law":
-        intent = QueryIntent.LAW_CODES
-    elif source == "contracts":
-        intent = QueryIntent.CONTRACTS
-    elif source == "both":
-        intent = QueryIntent.BOTH
-    # else auto-detect
-
-    # Validate category
-    if category and category not in LEGAL_CATEGORIES:
-        console.print(f"[red]Invalid category: {category}[/red]")
-        console.print(f"Valid categories: {', '.join(LEGAL_CATEGORIES.keys())}")
-        raise typer.Exit(1)
-
-    if category:
-        console.print(f"[dim]Filtering by category: {category} ({LEGAL_CATEGORIES[category]})[/dim]\n")
-
-    if deep:
-        # Use deep reasoning mode
-        console.print("\n[bold magenta]🧠 Deep Reasoning Mode[/bold magenta]\n")
-        try:
-            for chunk in reason_stream(question, ReasoningDepth.DEEP, intent, top_k):
-                console.print(chunk, end="")
-            console.print()
-        except Exception as e:
-            console.print(f"\n[red]Error: {e}[/red]")
-    else:
-        with console.status("[bold green]Thinking..."):
-            response = ask(question, intent=intent, top_k=top_k, category=category)
-
-        console.print()
-        console.print(Panel(response.answer, title="Answer", border_style="green"))
-
-
-@app.command()
-def reason(
     question: str = typer.Argument(..., help="Your legal question"),
-    source: str = typer.Option(
-        "auto",
-        help="Source to search: 'law', 'contracts', 'both', or 'auto'",
-    ),
-    category: str = typer.Option(
-        None,
-        "--category",
-        "-c",
-        help=f"Filter by legal category: {', '.join(LEGAL_CATEGORIES.keys())}",
-    ),
-    depth: str = typer.Option(
-        "deep",
-        help="Reasoning depth: 'quick', 'standard', or 'deep'",
-    ),
-    decompose: bool = typer.Option(
-        False,
-        "--decompose",
-        "-x",
-        help="Decompose query into sub-questions for comprehensive analysis",
-    ),
-    multistep: bool = typer.Option(
-        False,
-        "--multistep",
-        "-m",
-        help="Use multi-step iterative retrieval with gap analysis",
-    ),
-    hyde: bool = typer.Option(
-        False,
-        "--hyde",
-        help="Use HyDE (Hypothetical Document Embeddings) - can hallucinate, use with caution",
-    ),
-    iterations: int = typer.Option(
-        3,
-        help="Maximum retrieval iterations for multi-step mode",
-    ),
-    top_k: int = typer.Option(5, help="Number of chunks to retrieve"),
+    source: str = typer.Option("auto", help="Source: 'law', 'contracts', 'both', or 'auto'"),
+    category: str = typer.Option(None, "-c", "--category", help="Filter by legal category"),
+    top_k: int = typer.Option(5, help="Number of sources to retrieve"),
+    stream: bool = typer.Option(False, "-s", "--stream", help="Stream the response"),
+    json_output: bool = typer.Option(False, "--json", help="Output raw JSON for API use"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Show multi-step thinking process"),
 ):
-    """Deep legal reasoning with structured analysis."""
-    # Parse intent
-    intent = None
-    if source == "law":
-        intent = QueryIntent.LAW_CODES
-    elif source == "contracts":
-        intent = QueryIntent.CONTRACTS
-    elif source == "both":
-        intent = QueryIntent.BOTH
-
-    # Validate category
-    if category and category not in LEGAL_CATEGORIES:
-        console.print(f"[red]Invalid category: {category}[/red]")
-        console.print(f"Valid categories: {', '.join(LEGAL_CATEGORIES.keys())}")
+    """Ask a legal question and get a lawyer-style analysis."""
+    intent = _parse_intent(source)
+    if not _validate_category(category):
         raise typer.Exit(1)
 
-    # Parse depth
-    reasoning_depth = ReasoningDepth.DEEP
-    if depth == "quick":
-        reasoning_depth = ReasoningDepth.QUICK
-    elif depth == "standard":
-        reasoning_depth = ReasoningDepth.STANDARD
-
-    # Determine mode
-    if multistep:
-        mode_desc = f"Multi-Step Retrieval (max {iterations} iterations)"
-        if hyde:
-            mode_desc += " + HyDE (⚠️ may hallucinate)"
-    elif decompose:
-        mode_desc = "Query Decomposition"
-    else:
-        mode_desc = f"Depth: {reasoning_depth.value.upper()}"
-
     if category:
-        mode_desc += f"\nCategory: {category} ({LEGAL_CATEGORIES[category]})"
+        console.print(f"[dim]Category filter: {category}[/dim]\n")
 
     console.print()
     console.print(
         Panel(
-            f"[bold magenta]🧠 Legal Reasoning Mode[/bold magenta]\n\n"
-            f"Mode: {mode_desc}",
-            title="Mouham'IA Reasoning",
+            "[bold magenta]⚖️ Analyse Juridique[/bold magenta]",
+            title="Mouham'IA",
             border_style="magenta",
         )
     )
     console.print()
 
     try:
-        if multistep:
-            # Multi-step iterative retrieval
-            with console.status("[bold magenta]Multi-step retrieval and analysis..."):
-                result = reason_multistep(
-                    question,
-                    intent=intent,
-                    top_k=top_k,
-                    max_iterations=iterations,
-                    use_hyde=hyde,
-                )
-
-            # Show reasoning/retrieval steps
-            console.print("[bold cyan]Retrieval & Reasoning Steps:[/bold cyan]")
-            for i, step in enumerate(result.reasoning_steps, 1):
-                icon = {
-                    "hyde": "🔮",
-                    "initial_retrieval": "📚",
-                    "gap_analysis": "🔍",
-                    "follow_up_retrieval": "🔄",
-                    "synthesis": "⚖️",
-                }.get(step.step_type, "•")
-                console.print(f"  {icon} {step.content}")
-            console.print()
-
-            console.print(
-                Panel(
-                    result.final_answer,
-                    title=f"Legal Analysis (Confidence: {result.confidence})",
-                    border_style="green",
-                )
-            )
-
-        elif decompose:
-            with console.status("[bold magenta]Decomposing query and analyzing..."):
-                result = reason_with_decomposition(question, intent=intent, top_k=top_k)
-
-            # Show reasoning steps
-            console.print("[bold cyan]Reasoning Steps:[/bold cyan]")
-            for i, step in enumerate(result.reasoning_steps, 1):
-                console.print(f"  {i}. {step.step_type}: {step.content}")
-            console.print()
-
-            console.print(
-                Panel(
-                    result.final_answer,
-                    title=f"Legal Analysis (Confidence: {result.confidence})",
-                    border_style="green",
-                )
-            )
-        else:
-            # Streaming mode
-            for chunk in reason_stream(question, reasoning_depth, intent, top_k):
+        if stream:
+            # Streaming mode (already shows progress)
+            for chunk in analyze_stream(question, intent=intent, top_k=top_k):
                 console.print(chunk, end="")
             console.print()
+        else:
+            # Structured mode
+            if verbose:
+                # Verbose mode - show thinking process
+                console.print("[bold cyan]🧠 Processus de réflexion:[/bold cyan]\n")
+                
+                def print_progress(msg: str):
+                    console.print(f"  [dim]{msg}[/dim]")
+                
+                response = analyze(
+                    question, 
+                    intent=intent, 
+                    top_k=top_k, 
+                    category=category,
+                    verbose_callback=print_progress,
+                )
+                console.print()
+            else:
+                # Silent mode - just spinner
+                with console.status("[bold magenta]Analyse en cours..."):
+                    response = analyze(question, intent=intent, top_k=top_k, category=category)
+
+            if json_output:
+                # Raw JSON output
+                import json
+                console.print(json.dumps(response.model_dump(), indent=2, ensure_ascii=False))
+            else:
+                # Formatted CLI output
+                if response.succes and response.analyse_juridique:
+                    formatted = format_for_cli(response)
+                    console.print(
+                        Panel(
+                            formatted,
+                            title=f"Analyse (Confiance: {response.analyse_juridique.meta.niveau_confiance})",
+                            border_style="green",
+                        )
+                    )
+                else:
+                    console.print(f"[red]❌ {response.message_erreur}[/red]")
 
     except Exception as e:
         console.print(f"\n[red]Error: {e}[/red]")
@@ -318,107 +221,33 @@ def reason(
 
 
 @app.command()
-def compare(
-    topic: str = typer.Argument(..., help="Legal topic to compare"),
-    source: str = typer.Option(
-        "auto",
-        help="Source to search: 'law', 'contracts', 'both', or 'auto'",
-    ),
-):
-    """Compare legal provisions from different sources on a topic."""
-    intent = None
-    if source == "law":
-        intent = QueryIntent.LAW_CODES
-    elif source == "contracts":
-        intent = QueryIntent.CONTRACTS
-    elif source == "both":
-        intent = QueryIntent.BOTH
-
-    console.print()
-    console.print(
-        Panel(
-            "[bold cyan]⚖️ Comparative Legal Analysis[/bold cyan]",
-            title="Mouham'IA Compare",
-            border_style="cyan",
-        )
-    )
-    console.print()
-
-    with console.status("[bold cyan]Comparing provisions..."):
-        try:
-            result = compare_provisions(topic, intent=intent)
-            console.print(result)
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
-
-
-@app.command()
-def chat(
-    reasoning: bool = typer.Option(
-        False,
-        "--reasoning",
-        "-r",
-        help="Enable deep reasoning mode for all responses",
-    ),
-    multistep: bool = typer.Option(
-        False,
-        "--multistep",
-        "-m",
-        help="Use multi-step iterative retrieval in reasoning mode",
-    ),
-):
+def chat():
     """Start an interactive chat session."""
-    if multistep:
-        mode_text = "[bold magenta]Multi-Step Reasoning Mode[/bold magenta]"
-        border = "magenta"
-    elif reasoning:
-        mode_text = "[bold magenta]Reasoning Mode[/bold magenta]"
-        border = "magenta"
-    else:
-        mode_text = "[bold blue]Standard Mode[/bold blue]"
-        border = "blue"
-
     console.print(
         Panel(
-            f"[bold]Mouham'IA Chat[/bold] محامي\n\n"
-            f"Mode: {mode_text}\n\n"
-            "Ask questions about your legal documents.\n"
-            "Commands:\n"
-            "  • 'quit' or 'exit' - End session\n"
-            "  • 'stats' - Show index statistics\n"
-            "  • 'mode' - Cycle modes: Standard → Reasoning → Multi-Step\n"
-            "  • '/deep <question>' - One-off deep reasoning\n"
-            "  • '/multi <question>' - One-off multi-step reasoning",
-            title="Welcome",
-            border_style=border,
+            "[bold]Mouham'IA Chat[/bold] محامي\n\n"
+            "Posez vos questions juridiques.\n\n"
+            "Commandes:\n"
+            "  • 'quit' ou 'exit' - Quitter\n"
+            "  • 'stats' - Statistiques de l'index\n"
+            "  • '/json <question>' - Réponse en JSON",
+            title="Bienvenue",
+            border_style="magenta",
         )
     )
-
-    # Mode: 0 = standard, 1 = reasoning, 2 = multistep
-    if multistep:
-        current_mode = 2
-    elif reasoning:
-        current_mode = 1
-    else:
-        current_mode = 0
-
-    mode_names = ["Standard", "Reasoning", "Multi-Step Reasoning"]
-    mode_colors = ["cyan", "magenta", "magenta"]
 
     while True:
         try:
-            prompt_color = mode_colors[current_mode]
-            question = console.input(f"\n[bold {prompt_color}]You:[/bold {prompt_color}] ").strip()
+            question = console.input("\n[bold magenta]Vous:[/bold magenta] ").strip()
         except (KeyboardInterrupt, EOFError):
-            console.print("\n[yellow]Goodbye![/yellow]")
+            console.print("\n[yellow]Au revoir![/yellow]")
             break
 
         if not question:
             continue
 
         if question.lower() in ("quit", "exit"):
-            console.print("[yellow]Goodbye![/yellow]")
+            console.print("[yellow]Au revoir![/yellow]")
             break
 
         if question.lower() == "stats":
@@ -426,77 +255,26 @@ def chat(
                 stats = get_index_stats()
                 console.print(Panel(str(stats), title="Index Statistics"))
             except Exception as e:
-                console.print(f"[red]Error getting stats: {e}[/red]")
+                console.print(f"[red]Error: {e}[/red]")
             continue
 
-        if question.lower() == "mode":
-            current_mode = (current_mode + 1) % 3
-            console.print(f"[yellow]Switched to {mode_names[current_mode]} mode[/yellow]")
-            continue
-
-        if question.lower() == "help":
-            console.print(
-                Panel(
-                    "Commands:\n"
-                    "  • 'mode' - Cycle: Standard → Reasoning → Multi-Step\n"
-                    "  • '/deep <q>' - One-off deep reasoning\n"
-                    "  • '/multi <q>' - One-off multi-step reasoning\n"
-                    "  • 'stats' - Index statistics\n"
-                    "  • 'quit' - Exit",
-                    title="Help",
-                    border_style="cyan",
-                )
-            )
-            continue
-
-        # Check for command prefixes
-        use_mode = current_mode
-        if question.lower().startswith("/deep "):
-            use_mode = 1
+        # Check for JSON prefix
+        json_mode = False
+        if question.lower().startswith("/json "):
+            json_mode = True
             question = question[6:].strip()
-        elif question.lower().startswith("/multi "):
-            use_mode = 2
-            question = question[7:].strip()
 
         try:
-            if use_mode == 2:
-                # Multi-step reasoning
-                console.print("\n[bold magenta]🧠 Multi-Step Reasoning...[/bold magenta]\n")
-                with console.status("[bold magenta]Iterative retrieval and analysis..."):
-                    result = reason_multistep(question)
-
-                # Show retrieval steps
-                console.print("[bold cyan]Retrieval Steps:[/bold cyan]")
-                for step in result.reasoning_steps:
-                    icon = {
-                        "hyde": "🔮",
-                        "initial_retrieval": "📚",
-                        "gap_analysis": "🔍",
-                        "follow_up_retrieval": "🔄",
-                        "synthesis": "⚖️",
-                    }.get(step.step_type, "•")
-                    console.print(f"  {icon} {step.content}")
-                console.print()
-
-                console.print(
-                    Panel(
-                        result.final_answer,
-                        title=f"Analysis (Confidence: {result.confidence})",
-                        border_style="green",
-                    )
-                )
-
-            elif use_mode == 1:
-                # Deep reasoning (streaming)
-                console.print("\n[bold magenta]🧠 Reasoning...[/bold magenta]\n")
-                for chunk in reason_stream(question, ReasoningDepth.DEEP):
-                    console.print(chunk, end="")
-                console.print()
-
+            console.print("\n[bold green]Assistant:[/bold green]\n")
+            
+            if json_mode:
+                with console.status("[bold magenta]Analyse..."):
+                    response = analyze(question)
+                import json
+                console.print(json.dumps(response.model_dump(), indent=2, ensure_ascii=False))
             else:
-                # Standard mode
-                console.print("\n[bold green]Assistant:[/bold green] ", end="")
-                for chunk in chat_stream(question):
+                # Stream the response
+                for chunk in analyze_stream(question):
                     console.print(chunk, end="")
                 console.print()
 
@@ -504,32 +282,51 @@ def chat(
             console.print(f"\n[red]Error: {e}[/red]")
 
 
+# ============================================================================
+# Utility Commands
+# ============================================================================
+
 @app.command()
 def categories():
-    """List all available legal categories."""
+    """List all available legal categories (from ingested documents)."""
+    from rich.table import Table
+
     console.print()
     console.print(
         Panel(
-            "[bold]Available Legal Categories[/bold]\n\n"
-            "Use with --category / -c flag in ask, reason, or compare commands.",
+            "[bold]Catégories Juridiques Disponibles[/bold]\n\n"
+            "Catégories détectées automatiquement depuis les documents ingérés.\n"
+            "Utilisez avec --category / -c",
             title="Categories",
             border_style="cyan",
         )
     )
     console.print()
 
-    from rich.table import Table
-
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("Code", style="green")
-    table.add_column("Description")
-
-    for code, description in LEGAL_CATEGORIES.items():
-        table.add_row(code, description)
-
-    console.print(table)
-    console.print()
-    console.print("[dim]Example: mouhamia ask 'question' --category numerique[/dim]")
+    try:
+        with console.status("[bold cyan]Récupération des catégories..."):
+            available = get_all_categories()
+        
+        if not available:
+            console.print("[yellow]Aucune catégorie trouvée. Ingérez des documents d'abord.[/yellow]")
+            return
+        
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Catégorie", style="green")
+        table.add_column("Documents", justify="right")
+        
+        # Sort by count descending
+        sorted_cats = sorted(available.items(), key=lambda x: x[1], reverse=True)
+        for category, count in sorted_cats:
+            table.add_row(category, str(count))
+        
+        console.print(table)
+        console.print()
+        console.print(f"[dim]Total: {len(available)} catégories[/dim]")
+        console.print("[dim]Example: mouhamia ask 'question' --category civil[/dim]")
+        
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
 
 
 @app.command()
@@ -557,79 +354,57 @@ def init():
 
 @app.command()
 def reset(
-    target: str = typer.Option(
-        "all",
-        help="What to reset: 'all', 'laws', 'contracts', or 'index' (deletes entire index)",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Skip confirmation prompt",
-    ),
+    target: str = typer.Option("all", help="What to reset: 'all', 'laws', 'contracts', or 'index'"),
+    force: bool = typer.Option(False, "-f", "--force", help="Skip confirmation"),
 ):
     """Reset/clear the vector database."""
-    # Confirmation
     if target == "index":
         action = "DELETE the entire Pinecone index"
-        warning = "[bold red]This will permanently delete the index and all data![/bold red]"
+        warning = "[bold red]This will permanently delete the index![/bold red]"
     elif target == "all":
-        action = "clear ALL vectors from both namespaces"
-        warning = "[yellow]This will delete all law codes and contracts data.[/yellow]"
+        action = "clear ALL vectors"
+        warning = "[yellow]This will delete all data.[/yellow]"
     elif target == "laws":
         action = "clear all LAW CODES"
-        warning = "[yellow]This will delete all ingested law documents.[/yellow]"
+        warning = "[yellow]This will delete all law documents.[/yellow]"
     elif target == "contracts":
         action = "clear all CONTRACTS"
-        warning = "[yellow]This will delete all ingested contract documents.[/yellow]"
+        warning = "[yellow]This will delete all contract documents.[/yellow]"
     else:
         console.print(f"[red]Invalid target: {target}[/red]")
-        console.print("Valid options: all, laws, contracts, index")
         raise typer.Exit(1)
 
     console.print()
-    console.print(
-        Panel(
-            f"[bold]Action:[/bold] {action}\n\n{warning}",
-            title="⚠️ Reset Confirmation",
-            border_style="red",
-        )
-    )
+    console.print(Panel(f"[bold]Action:[/bold] {action}\n\n{warning}", title="⚠️ Confirmation", border_style="red"))
 
     if not force:
-        confirm = typer.confirm("\nAre you sure you want to proceed?")
+        confirm = typer.confirm("\nContinue?")
         if not confirm:
             console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
-
-    console.print()
 
     try:
         if target == "index":
             with console.status("[bold red]Deleting index..."):
                 deleted = delete_index()
-            if deleted:
-                console.print("[green]✓ Index deleted successfully.[/green]")
-                console.print("[dim]Run 'mouhamia init' to recreate the index.[/dim]")
-            else:
-                console.print("[yellow]Index did not exist.[/yellow]")
+            console.print("[green]✓ Index deleted.[/green]" if deleted else "[yellow]Index did not exist.[/yellow]")
 
         elif target == "all":
-            with console.status("[bold yellow]Clearing all namespaces..."):
+            with console.status("[bold yellow]Clearing..."):
                 deleted = clear_all_namespaces()
-            console.print("[green]✓ All namespaces cleared:[/green]")
+            console.print("[green]✓ Cleared:[/green]")
             for ns, count in deleted.items():
-                console.print(f"  - {ns}: {count} vectors deleted")
+                console.print(f"  - {ns}: {count} vectors")
 
         elif target == "laws":
-            with console.status("[bold yellow]Clearing law codes..."):
+            with console.status("[bold yellow]Clearing laws..."):
                 count = clear_namespace(NAMESPACE_LAW_CODES)
-            console.print(f"[green]✓ Cleared {count} vectors from law_codes namespace.[/green]")
+            console.print(f"[green]✓ Cleared {count} vectors from law_codes.[/green]")
 
         elif target == "contracts":
             with console.status("[bold yellow]Clearing contracts..."):
                 count = clear_namespace(NAMESPACE_USER_CONTRACTS)
-            console.print(f"[green]✓ Cleared {count} vectors from user_contracts namespace.[/green]")
+            console.print(f"[green]✓ Cleared {count} vectors from contracts.[/green]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -643,4 +418,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

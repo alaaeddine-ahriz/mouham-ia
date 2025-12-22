@@ -2,41 +2,38 @@
 
 __version__ = "0.1.0"
 
-# Main API exports
+# Main API - single entry point
 from .rag import (
-    RAGResponse,
-    ask,
-    chat_stream,
-    reason,
-    LegalReasoning,
-    ReasoningDepth,
+    # Functions
+    analyze,
+    analyze_stream,
+    format_for_cli,
+    # Models
+    LawyerResponse,
+    LawyerAnalysis,
+    SourceCitation,
+    ArgumentCite,
+    ConclusionBreve,
+    AnalyseApprofondie,
+    MetaAnalyse,
+    RaisonnementJuridique,
+    QueryIntent,
 )
-from .reasoning import (
-    compare_provisions,
-    multi_step_retrieve,
-    reason_deep,
-    reason_multistep,
-    reason_stream,
-    reason_with_decomposition,
-)
-from .retriever import QueryIntent
 
 __all__ = [
-    # Core functions
-    "ask",
-    "chat_stream",
-    "reason",
-    # Reasoning
-    "reason_deep",
-    "reason_multistep",
-    "reason_stream",
-    "reason_with_decomposition",
-    "compare_provisions",
-    "multi_step_retrieve",
-    # Types
-    "RAGResponse",
-    "LegalReasoning",
-    "ReasoningDepth",
+    # Main functions
+    "analyze",
+    "analyze_stream",
+    "format_for_cli",
+    # Response models
+    "LawyerResponse",
+    "LawyerAnalysis",
+    "SourceCitation",
+    "ArgumentCite",
+    "ConclusionBreve",
+    "AnalyseApprofondie",
+    "MetaAnalyse",
+    "RaisonnementJuridique",
+    # Query intent
     "QueryIntent",
 ]
-

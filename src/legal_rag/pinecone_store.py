@@ -291,3 +291,61 @@ def get_index_stats() -> dict:
     index = pc.Index(settings.pinecone_index_name)
     return index.describe_index_stats()
 
+
+def get_available_categories(namespace: str = NAMESPACE_LAW_CODES) -> dict[str, int]:
+    """
+    Get available categories from the index metadata.
+    
+    Retrieves unique category values and their document counts
+    by sampling vectors from the index.
+    
+    Args:
+        namespace: Namespace to query (default: law_codes)
+    
+    Returns:
+        Dict mapping category names to approximate document counts
+    """
+    settings = get_settings()
+    pc = get_pinecone_client()
+    index = pc.Index(settings.pinecone_index_name)
+    
+    # Get a sample of vectors to extract categories
+    # We use a zero vector to get random results
+    zero_vector = [0.0] * settings.embedding_dimensions
+    
+    # Query a large sample to discover categories
+    results = index.query(
+        vector=zero_vector,
+        namespace=namespace,
+        top_k=1000,  # Get a good sample
+        include_metadata=True,
+    )
+    
+    # Count categories
+    categories: dict[str, int] = {}
+    for match in results.matches:
+        cat = match.metadata.get("category", "general")
+        categories[cat] = categories.get(cat, 0) + 1
+    
+    return categories
+
+
+def get_all_categories() -> dict[str, int]:
+    """
+    Get all available categories across all namespaces.
+    
+    Returns:
+        Dict mapping category names to document counts
+    """
+    all_categories: dict[str, int] = {}
+    
+    for namespace in [NAMESPACE_LAW_CODES, NAMESPACE_USER_CONTRACTS]:
+        try:
+            ns_categories = get_available_categories(namespace)
+            for cat, count in ns_categories.items():
+                all_categories[cat] = all_categories.get(cat, 0) + count
+        except Exception:
+            pass  # Namespace might not exist
+    
+    return all_categories
+

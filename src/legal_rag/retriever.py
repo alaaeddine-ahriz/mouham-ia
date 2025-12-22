@@ -36,13 +36,24 @@ def detect_query_intent(query: str) -> QueryIntent:
         messages=[
             {
                 "role": "system",
-                "content": """You are a query classifier for a legal RAG system.
-Classify queries into one of three categories:
-- LAW: Questions about laws, codes, statutes, regulations, legal articles
-- CONTRACT: Questions about specific contracts, agreements, personal legal documents
-- BOTH: Questions that need both law codes AND contract context
+                "content": """Vous êtes un classificateur de requêtes pour un système juridique RAG.
 
-Respond with exactly one word: LAW, CONTRACT, or BOTH""",
+Classifiez les requêtes en UNE des trois catégories:
+
+- LAW: Questions sur les lois, codes, textes législatifs, réglementations, articles de loi, 
+  droits, obligations légales, fiscalité, droit du travail, procédures judiciaires, etc.
+  MÊME si l'utilisateur pose la question dans un contexte personnel ("mon entreprise", "ma situation").
+  
+- CONTRACT: Questions sur un contrat SPÉCIFIQUE déjà signé ou en cours de rédaction,
+  clauses contractuelles particulières, interprétation d'un contrat existant.
+  
+- BOTH: Questions qui nécessitent à la fois les textes de loi ET un contrat spécifique.
+
+IMPORTANT: La plupart des questions juridiques personnelles (salaire, impôts, droits, 
+obligations employeur/employé) nécessitent de chercher dans les CODES DE LOI (LAW), 
+pas dans les contrats.
+
+Répondez avec exactement un mot: LAW, CONTRACT, ou BOTH""",
             },
             {"role": "user", "content": query},
         ],
@@ -52,12 +63,13 @@ Respond with exactly one word: LAW, CONTRACT, or BOTH""",
 
     classification = response.choices[0].message.content.strip().upper()
 
-    if classification == "LAW":
-        return QueryIntent.LAW_CODES
-    elif classification == "CONTRACT":
+    if classification == "CONTRACT":
         return QueryIntent.CONTRACTS
-    else:
+    elif classification == "BOTH":
         return QueryIntent.BOTH
+    else:
+        # Default to LAW_CODES for most legal questions
+        return QueryIntent.LAW_CODES
 
 
 def retrieve(
