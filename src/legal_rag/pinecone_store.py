@@ -7,7 +7,7 @@ import unicodedata
 from pinecone import Pinecone, ServerlessSpec
 
 from .config import get_settings
-from .ingest.chunker import Chunk
+from .ingest.chunker import ArticleChunk, Chunk
 
 
 def _make_ascii_id(text: str) -> str:
@@ -97,6 +97,51 @@ def upsert_chunks(
 
     return total_upserted
 
+
+def upsert_article_chunks(
+    chunks: list[ArticleChunk],
+    embeddings: list[list[float]],
+    namespace: str,
+    batch_size: int = 100,
+) -> int:
+    """
+    Upsert article chunks with embeddings to Pinecone.
+
+    Uses stable article-based IDs for deduplication.
+
+    Args:
+        chunks: List of ArticleChunk objects
+        embeddings: Corresponding embedding vectors
+        namespace: Pinecone namespace
+        batch_size: Number of vectors per upsert call
+
+    Returns:
+        Number of vectors upserted
+    """
+    settings = get_settings()
+    pc = get_pinecone_client()
+    index = pc.Index(settings.pinecone_index_name)
+
+    # Prepare vectors with stable IDs
+    vectors = []
+    for chunk, embedding in zip(chunks, embeddings):
+        vector_id = chunk.get_vector_id(namespace)
+        vectors.append(
+            {
+                "id": vector_id,
+                "values": embedding,
+                "metadata": chunk.to_metadata(),
+            }
+        )
+
+    # Upsert in batches
+    total_upserted = 0
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i : i + batch_size]
+        index.upsert(vectors=batch, namespace=namespace)
+        total_upserted += len(batch)
+
+    return total_upserted
 
 def query_similar(
     query_embedding: list[float],

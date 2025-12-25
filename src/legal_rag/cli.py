@@ -9,8 +9,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .config import get_settings
 from .embeddings import get_embeddings
-from .ingest.chunker import chunk_document
-from .ingest.pdf_extractor import extract_pdf, extract_pdfs_from_directory
+from .ingest.chunker import chunk_articles, chunk_document
+from .ingest.pdf_extractor import (
+    extract_pdf,
+    extract_pdf_with_layout,
+    extract_pdfs_from_directory,
+    extract_pdfs_with_layout,
+)
 from .pinecone_store import (
     NAMESPACE_LAW_CODES,
     NAMESPACE_USER_CONTRACTS,
@@ -20,6 +25,7 @@ from .pinecone_store import (
     ensure_index_exists,
     get_all_categories,
     get_index_stats,
+    upsert_article_chunks,
     upsert_chunks,
 )
 from .rag import analyze, analyze_stream, format_for_cli, QueryIntent
@@ -39,11 +45,61 @@ console = Console()
 @app.command()
 def ingest_laws(
     path: Path = typer.Argument(..., help="Path to PDF file or directory of PDFs"),
-    chunk_size: int = typer.Option(512, help="Chunk size in tokens"),
-    chunk_overlap: int = typer.Option(50, help="Chunk overlap in tokens"),
+    max_tokens: int = typer.Option(1500, help="Max tokens per article chunk (for sub-chunking)"),
 ):
-    """Ingest law code documents into the law_codes namespace."""
-    _ingest(path, NAMESPACE_LAW_CODES, chunk_size, chunk_overlap)
+    """Ingest law code documents using article-based chunking."""
+    if not path.exists():
+        console.print(f"[red]Error: Path does not exist: {path}[/red]")
+        raise typer.Exit(1)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Ensuring Pinecone index exists...", total=None)
+        ensure_index_exists()
+
+        progress.add_task("Extracting PDFs with layout...", total=None)
+        if path.is_file():
+            documents = [extract_pdf_with_layout(path)]
+        else:
+            documents = extract_pdfs_with_layout(path)
+
+        if not documents:
+            console.print("[yellow]No PDF documents found.[/yellow]")
+            raise typer.Exit(0)
+
+        console.print(f"[green]Found {len(documents)} document(s)[/green]")
+
+        all_chunks = []
+        total_articles = 0
+        for doc in documents:
+            progress.add_task(f"Detecting articles in {doc.source}...", total=None)
+            chunks = chunk_articles(doc, max_tokens=max_tokens)
+            all_chunks.extend(chunks)
+            
+            # Count unique articles
+            article_ids = set(c.article_id for c in chunks)
+            total_articles += len(article_ids)
+            console.print(f"  {doc.source}: {len(article_ids)} articles → {len(chunks)} chunks")
+
+        console.print(f"[green]Total: {total_articles} articles → {len(all_chunks)} chunks[/green]")
+
+        progress.add_task("Generating embeddings...", total=None)
+        texts = [chunk.text for chunk in all_chunks]
+        embeddings = get_embeddings(texts)
+
+        progress.add_task("Uploading to Pinecone...", total=None)
+        count = upsert_article_chunks(all_chunks, embeddings, NAMESPACE_LAW_CODES)
+
+    console.print(
+        Panel(
+            f"[green]Successfully ingested {count} chunks into '{NAMESPACE_LAW_CODES}' namespace[/green]\n"
+            f"[dim]Articles are now chunked by legal structure with highlight metadata.[/dim]",
+            title="✅ Ingestion Complete",
+        )
+    )
 
 
 @app.command()
@@ -52,12 +108,7 @@ def ingest_contracts(
     chunk_size: int = typer.Option(512, help="Chunk size in tokens"),
     chunk_overlap: int = typer.Option(50, help="Chunk overlap in tokens"),
 ):
-    """Ingest contract documents into the user_contracts namespace."""
-    _ingest(path, NAMESPACE_USER_CONTRACTS, chunk_size, chunk_overlap)
-
-
-def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
-    """Common ingestion logic."""
+    """Ingest contract documents using token-based chunking."""
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         raise typer.Exit(1)
@@ -96,14 +147,16 @@ def _ingest(path: Path, namespace: str, chunk_size: int, chunk_overlap: int):
         embeddings = get_embeddings(texts)
 
         progress.add_task("Uploading to Pinecone...", total=None)
-        count = upsert_chunks(all_chunks, embeddings, namespace)
+        count = upsert_chunks(all_chunks, embeddings, NAMESPACE_USER_CONTRACTS)
 
     console.print(
         Panel(
-            f"[green]Successfully ingested {count} chunks into '{namespace}' namespace[/green]",
-            title="Ingestion Complete",
+            f"[green]Successfully ingested {count} chunks into '{NAMESPACE_USER_CONTRACTS}' namespace[/green]",
+            title="✅ Ingestion Complete",
         )
     )
+
+
 
 
 # ============================================================================
