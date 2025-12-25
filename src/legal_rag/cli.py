@@ -275,19 +275,25 @@ def ask_question(
 
 @app.command()
 def chat():
-    """Start an interactive chat session."""
+    """Start an interactive chat session with conversation memory."""
     console.print(
         Panel(
             "[bold]Mouham'IA Chat[/bold] محامي\n\n"
-            "Posez vos questions juridiques.\n\n"
+            "Posez vos questions juridiques.\n"
+            "[dim]La conversation garde en mémoire les 3 derniers échanges.[/dim]\n\n"
             "Commandes:\n"
             "  • 'quit' ou 'exit' - Quitter\n"
+            "  • 'clear' - Effacer l'historique\n"
             "  • 'stats' - Statistiques de l'index\n"
             "  • '/json <question>' - Réponse en JSON",
             title="Bienvenue",
             border_style="magenta",
         )
     )
+
+    # Conversation history: stores last N exchanges
+    conversation_history: list[dict] = []
+    MAX_HISTORY = 6  # 3 exchanges (user + assistant each)
 
     while True:
         try:
@@ -302,6 +308,11 @@ def chat():
         if question.lower() in ("quit", "exit"):
             console.print("[yellow]Au revoir![/yellow]")
             break
+
+        if question.lower() == "clear":
+            conversation_history.clear()
+            console.print("[green]✓ Historique effacé[/green]")
+            continue
 
         if question.lower() == "stats":
             try:
@@ -325,11 +336,24 @@ def chat():
                     response = analyze(question)
                 import json
                 console.print(json.dumps(response.model_dump(), indent=2, ensure_ascii=False))
+                # Add to history (truncated for JSON mode)
+                conversation_history.append({"role": "user", "content": question})
+                conversation_history.append({"role": "assistant", "content": "[Réponse JSON]"})
             else:
-                # Stream the response
-                for chunk in analyze_stream(question):
+                # Stream the response with conversation history
+                response_text = ""
+                for chunk in analyze_stream(question, conversation_history=conversation_history):
                     console.print(chunk, end="")
+                    response_text += chunk
                 console.print()
+                
+                # Add to history
+                conversation_history.append({"role": "user", "content": question})
+                conversation_history.append({"role": "assistant", "content": response_text})
+            
+            # Trim history to keep only last N messages
+            if len(conversation_history) > MAX_HISTORY:
+                conversation_history = conversation_history[-MAX_HISTORY:]
 
         except Exception as e:
             console.print(f"\n[red]Error: {e}[/red]")

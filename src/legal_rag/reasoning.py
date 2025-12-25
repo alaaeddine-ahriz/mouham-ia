@@ -447,12 +447,21 @@ def analyze_stream(
     intent: QueryIntent | None = None,
     top_k: int | None = None,
     use_multi_step: bool = True,
+    conversation_history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """
     Stream legal analysis response with multi-step retrieval.
     
     Uses query decomposition and gap analysis for thorough coverage,
     then streams the final analysis.
+    
+    Args:
+        query: The legal question
+        intent: Override auto-detection (LAW_CODES, CONTRACTS, BOTH)
+        top_k: Number of sources to retrieve per step
+        use_multi_step: Use multi-step retrieval with gap analysis
+        conversation_history: Optional list of previous exchanges for context
+            Format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
     
     Yields formatted text chunks as they arrive.
     """
@@ -533,15 +542,27 @@ RÈGLES:
 - Utilisez UNIQUEMENT les documents fournis
 - Citations EXACTES en français
 - Chaque affirmation DOIT être citée
-- Ton juridique professionnel"""
+- Ton juridique professionnel
+- Si l'utilisateur fait référence à un échange précédent, tenez compte du contexte de conversation"""
+
+    # Build conversation context if provided
+    history_context = ""
+    if conversation_history:
+        history_context = "\n\nCONTEXTE DE CONVERSATION PRÉCÉDENTE:\n"
+        for msg in conversation_history[-6:]:  # Keep last 3 exchanges (6 messages)
+            role = "Utilisateur" if msg["role"] == "user" else "Assistant"
+            # Truncate long messages
+            content = msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"]
+            history_context += f"\n{role}: {content}\n"
+        history_context += "\n---\n"
 
     user_content = f"""DOCUMENTS JURIDIQUES:
 
 {context}
-
+{history_context}
 ---
 
-QUESTION: {query}"""
+QUESTION ACTUELLE: {query}"""
 
     model = settings.model
     messages = build_messages(streaming_prompt, user_content)
