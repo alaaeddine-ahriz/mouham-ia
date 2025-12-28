@@ -203,6 +203,7 @@ def ask_question(
     stream: bool = typer.Option(False, "-s", "--stream", help="Stream the response"),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON for API use"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show multi-step thinking process"),
+    force_rag: bool = typer.Option(False, "--rag", help="Force RAG retrieval (bypass router)"),
 ):
     """Ask a legal question and get a lawyer-style analysis."""
     intent = _parse_intent(source)
@@ -225,7 +226,7 @@ def ask_question(
     try:
         if stream:
             # Streaming mode (already shows progress)
-            for chunk in analyze_stream(question, intent=intent, top_k=top_k):
+            for chunk in analyze_stream(question, intent=intent, top_k=top_k, force_rag=force_rag):
                 console.print(chunk, end="")
             console.print()
         else:
@@ -243,12 +244,13 @@ def ask_question(
                     top_k=top_k, 
                     category=category,
                     verbose_callback=print_progress,
+                    force_rag=force_rag,
                 )
                 console.print()
             else:
                 # Silent mode - just spinner
                 with console.status("[bold magenta]Analyse en cours..."):
-                    response = analyze(question, intent=intent, top_k=top_k, category=category)
+                    response = analyze(question, intent=intent, top_k=top_k, category=category, force_rag=force_rag)
 
             if json_output:
                 # Raw JSON output
@@ -256,7 +258,16 @@ def ask_question(
                 console.print(json.dumps(response.model_dump(), indent=2, ensure_ascii=False))
             else:
                 # Formatted CLI output
-                if response.succes and response.analyse_juridique:
+                if response.succes and response.reponse_directe:
+                    # Direct answer (no RAG used)
+                    console.print(
+                        Panel(
+                            response.reponse_directe,
+                            title="⚡ Réponse Directe",
+                            border_style="cyan",
+                        )
+                    )
+                elif response.succes and response.analyse_juridique:
                     formatted = format_for_cli(response)
                     console.print(
                         Panel(
@@ -280,11 +291,13 @@ def chat():
         Panel(
             "[bold]Mouham'IA Chat[/bold] محامي\n\n"
             "Posez vos questions juridiques.\n"
-            "[dim]La conversation garde en mémoire les 3 derniers échanges.[/dim]\n\n"
+            "[dim]La conversation garde en mémoire les 3 derniers échanges.[/dim]\n"
+            "[dim]Le routeur optimise automatiquement: réponse directe pour les questions générales, RAG pour les questions légales spécifiques.[/dim]\n\n"
             "Commandes:\n"
             "  • 'quit' ou 'exit' - Quitter\n"
             "  • 'clear' - Effacer l'historique\n"
             "  • 'stats' - Statistiques de l'index\n"
+            "  • '/rag <question>' - Forcer l'utilisation de RAG\n"
             "  • '/json <question>' - Réponse en JSON",
             title="Bienvenue",
             border_style="magenta",
@@ -322,18 +335,23 @@ def chat():
                 console.print(f"[red]Error: {e}[/red]")
             continue
 
-        # Check for JSON prefix
+        # Check for special prefixes
         json_mode = False
+        force_rag = False
+        
         if question.lower().startswith("/json "):
             json_mode = True
             question = question[6:].strip()
+        elif question.lower().startswith("/rag "):
+            force_rag = True
+            question = question[5:].strip()
 
         try:
             console.print("\n[bold green]Assistant:[/bold green]\n")
             
             if json_mode:
                 with console.status("[bold magenta]Analyse..."):
-                    response = analyze(question)
+                    response = analyze(question, force_rag=True)  # JSON mode always uses RAG
                 import json
                 console.print(json.dumps(response.model_dump(), indent=2, ensure_ascii=False))
                 # Add to history (truncated for JSON mode)
@@ -342,7 +360,7 @@ def chat():
             else:
                 # Stream the response with conversation history
                 response_text = ""
-                for chunk in analyze_stream(question, conversation_history=conversation_history):
+                for chunk in analyze_stream(question, conversation_history=conversation_history, force_rag=force_rag):
                     console.print(chunk, end="")
                     response_text += chunk
                 console.print()

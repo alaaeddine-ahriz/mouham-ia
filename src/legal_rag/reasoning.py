@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .embeddings import get_embedding
 from .retriever import QueryIntent, format_context_for_llm, retrieve
+from .router import (
+    QuestionType,
+    route_question,
+    check_needs_rag_fallback,
+    DIRECT_ANSWER_SYSTEM_PROMPT,
+)
 
 
 # ============================================================================
@@ -96,6 +102,7 @@ class LawyerResponse(BaseModel):
     nombre_sources: int = Field(default=0, description="Nombre de sources utilisées")
     analyse_juridique: LawyerAnalysis | None = Field(default=None, description="Analyse juridique complète")
     message_erreur: str | None = Field(default=None, description="Message d'erreur si échec")
+    reponse_directe: str | None = Field(default=None, description="Réponse directe sans RAG (pour questions générales)")
 
 
 # ============================================================================
@@ -323,6 +330,42 @@ def multi_step_retrieve(
 # Core Function - Single Entry Point
 # ============================================================================
 
+def answer_directly(
+    query: str,
+    client: OpenAI,
+    model: str,
+    verbose_callback=None,
+) -> str:
+    """
+    Answer a question directly without RAG retrieval.
+    
+    Used for general/explanatory questions that don't require legal citations.
+    
+    Args:
+        query: The user's question
+        client: OpenAI client
+        model: Model to use
+        verbose_callback: Optional callback for progress updates
+    
+    Returns:
+        The model's response text
+    """
+    if verbose_callback:
+        verbose_callback("⚡ Réponse directe (sans RAG)...")
+    
+    messages = [
+        {"role": "system", "content": DIRECT_ANSWER_SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
+    
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+    )
+    
+    return response.choices[0].message.content
+
+
 def analyze(
     query: str,
     intent: QueryIntent | None = None,
@@ -330,13 +373,16 @@ def analyze(
     category: str | None = None,
     use_multi_step: bool = True,
     verbose_callback=None,
+    force_rag: bool = False,
+    use_router: bool = True,
 ) -> LawyerResponse:
     """
     Analyze a legal question and return structured JSON response.
     
     This is the SINGLE entry point for legal analysis.
-    Uses multi-step retrieval with gap analysis for thorough coverage.
-    Returns LawyerResponse with clean JSON for direct UI consumption.
+    Uses a router to determine if RAG is needed, then either:
+    - Answers directly for general questions
+    - Uses multi-step retrieval with gap analysis for questions needing citations
     
     Args:
         query: The legal question
@@ -344,7 +390,9 @@ def analyze(
         top_k: Number of sources to retrieve per step
         category: Filter by legal category (civil, commercial, etc.)
         use_multi_step: Use multi-step retrieval with gap analysis (default: True)
-        verbose_callback: Optional callback function for progress updates (receives str messages)
+        verbose_callback: Optional callback function for progress updates
+        force_rag: Force RAG retrieval even if router says otherwise (default: False)
+        use_router: Use the question router to optimize (default: True)
     
     Returns:
         LawyerResponse with:
@@ -355,8 +403,63 @@ def analyze(
     """
     settings = get_settings()
     client = OpenAI(api_key=settings.openai_api_key)
-    
+    model = settings.model
     effective_top_k = top_k or settings.top_k
+    
+    # Route the question (unless force_rag is set)
+    if not force_rag and use_router:
+        if verbose_callback:
+            verbose_callback("🔀 Classification de la question...")
+        
+        question_type = route_question(query, client)
+        
+        if verbose_callback:
+            type_labels = {
+                QuestionType.DIRECT_ANSWER: "⚡ Question générale → réponse directe",
+                QuestionType.NEEDS_RAG: "📚 Question spécifique → RAG nécessaire",
+                QuestionType.UNCERTAIN: "🤔 Incertain → essai direct d'abord",
+            }
+            verbose_callback(type_labels.get(question_type, str(question_type)))
+        
+        # Handle DIRECT_ANSWER - answer without RAG
+        if question_type == QuestionType.DIRECT_ANSWER:
+            direct_response = answer_directly(query, client, model, verbose_callback)
+            
+            # Return as a simplified LawyerResponse
+            return LawyerResponse(
+                succes=True,
+                question=query,
+                sources_trouvees=False,
+                nombre_sources=0,
+                analyse_juridique=None,
+                message_erreur=None,
+                reponse_directe=direct_response,  # New field for direct answers
+            )
+        
+        # Handle UNCERTAIN - try direct first, fallback to RAG if needed
+        if question_type == QuestionType.UNCERTAIN:
+            direct_response = answer_directly(query, client, model, verbose_callback)
+            
+            # Check if the response indicates RAG is needed
+            if not check_needs_rag_fallback(direct_response):
+                if verbose_callback:
+                    verbose_callback("✓ Réponse directe suffisante")
+                return LawyerResponse(
+                    succes=True,
+                    question=query,
+                    sources_trouvees=False,
+                    nombre_sources=0,
+                    analyse_juridique=None,
+                    message_erreur=None,
+                    reponse_directe=direct_response,
+                )
+            
+            if verbose_callback:
+                verbose_callback("🔄 Fallback vers RAG (citations requises)...")
+    
+    # NEEDS_RAG or force_rag - proceed with RAG retrieval
+    if verbose_callback and force_rag:
+        verbose_callback("📚 Mode RAG forcé...")
     
     # Use multi-step retrieval for thorough coverage
     if use_multi_step:
@@ -387,7 +490,6 @@ def analyze(
         )
     
     context = format_context_for_llm(chunks)
-    model = settings.model
     
     if verbose_callback:
         verbose_callback(f"⚖️ Génération de l'analyse juridique avec {model}...")
@@ -448,12 +550,15 @@ def analyze_stream(
     top_k: int | None = None,
     use_multi_step: bool = True,
     conversation_history: list[dict] | None = None,
+    force_rag: bool = False,
+    use_router: bool = True,
 ) -> Generator[str, None, None]:
     """
-    Stream legal analysis response with multi-step retrieval.
+    Stream legal analysis response with optional routing.
     
-    Uses query decomposition and gap analysis for thorough coverage,
-    then streams the final analysis.
+    Uses router to determine if RAG is needed:
+    - Direct answers stream immediately without retrieval
+    - RAG questions use multi-step retrieval then stream analysis
     
     Args:
         query: The legal question
@@ -461,14 +566,69 @@ def analyze_stream(
         top_k: Number of sources to retrieve per step
         use_multi_step: Use multi-step retrieval with gap analysis
         conversation_history: Optional list of previous exchanges for context
-            Format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+        force_rag: Force RAG retrieval even if router says otherwise
+        use_router: Use the question router to optimize (default: True)
     
     Yields formatted text chunks as they arrive.
     """
     settings = get_settings()
     client = OpenAI(api_key=settings.openai_api_key)
-    
+    model = settings.model
     effective_top_k = top_k or settings.top_k
+    
+    # Route the question (unless force_rag is set)
+    if not force_rag and use_router:
+        yield "🔀 **Classification de la question...**\n\n"
+        question_type = route_question(query, client)
+        
+        type_labels = {
+            QuestionType.DIRECT_ANSWER: "⚡ Question générale → réponse directe",
+            QuestionType.NEEDS_RAG: "📚 Question spécifique → RAG nécessaire",
+            QuestionType.UNCERTAIN: "🤔 Incertain → essai direct d'abord",
+        }
+        yield f"  {type_labels.get(question_type, str(question_type))}\n\n"
+        
+        # Handle DIRECT_ANSWER - stream without RAG
+        if question_type == QuestionType.DIRECT_ANSWER:
+            yield "---\n\n"
+            
+            # Build conversation context if provided
+            messages = [{"role": "system", "content": DIRECT_ANSWER_SYSTEM_PROMPT}]
+            if conversation_history:
+                for msg in conversation_history[-6:]:
+                    messages.append(msg)
+            messages.append({"role": "user", "content": query})
+            
+            stream = call_llm(client, model, messages, stream=True)
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+            return
+        
+        # Handle UNCERTAIN - try direct first
+        if question_type == QuestionType.UNCERTAIN:
+            yield "---\n\n"
+            
+            # Collect direct response to check if fallback needed
+            messages = [{"role": "system", "content": DIRECT_ANSWER_SYSTEM_PROMPT}]
+            if conversation_history:
+                for msg in conversation_history[-6:]:
+                    messages.append(msg)
+            messages.append({"role": "user", "content": query})
+            
+            response = client.chat.completions.create(model=model, messages=messages)
+            direct_response = response.choices[0].message.content
+            
+            # Check if fallback to RAG is needed
+            if not check_needs_rag_fallback(direct_response):
+                yield direct_response
+                return
+            
+            yield "🔄 **Fallback vers RAG (citations requises)...**\n\n"
+    
+    if force_rag:
+        yield "📚 **Mode RAG forcé**\n\n"
+    
     progress_messages = []
     
     def capture_progress(msg: str):
@@ -564,7 +724,6 @@ RÈGLES:
 
 QUESTION ACTUELLE: {query}"""
 
-    model = settings.model
     messages = build_messages(streaming_prompt, user_content)
     stream = call_llm(client, model, messages, stream=True)
 

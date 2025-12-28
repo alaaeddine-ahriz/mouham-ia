@@ -16,6 +16,7 @@ from .reasoning import (
     RaisonnementJuridique,
 )
 from .retriever import QueryIntent
+from .router import QuestionType, route_question
 
 # Public API
 __all__ = [
@@ -34,4 +35,7 @@ __all__ = [
     "RaisonnementJuridique",
     # Query intent
     "QueryIntent",
+    # Router
+    "QuestionType",
+    "route_question",
 ]
